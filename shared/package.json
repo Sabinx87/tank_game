@@ -1,0 +1,12 @@
+{
+  "name": "@tanks/shared",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Code shared by client and server: types, constants, weapons, physics, terrain",
+  "scripts": {
+    "test": "tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  }
+}
