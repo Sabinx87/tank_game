@@ -1,11 +1,14 @@
-import { WEAPONS, ownedCount } from '@shared/weapons';
+import { SHOP_SECTIONS, ownedOf, type ShopCategory, type ShopItem } from '@shared/shop';
 import { sounds } from '../audio/sounds';
 import { h, replaceChildren, toast, type Page } from '../dom';
 import { api } from '../net';
 import { colorOf, playerName, store } from '../store';
 import { resultsTable } from './resultsTable';
 
-/** Between rounds: results of the last round + the weapon shop + Ready button. */
+const hex = (c: number) => `#${c.toString(16).padStart(6, '0')}`;
+const cardKey = (i: ShopItem) => `${i.category}:${i.id}`;
+
+/** Between rounds: results of the last round + the shop (bombs, shields, repair kits) + Ready button. */
 export class ShopPage implements Page {
   readonly el: HTMLElement;
   private heading = h('h2', {});
@@ -13,30 +16,38 @@ export class ShopPage implements Page {
   private points = h('div', { class: 'points' });
   // Cards are built once and updated in place, so a click is never lost to a re-render.
   private cards = new Map(
-    WEAPONS.map((w) => [
-      w.id,
+    SHOP_SECTIONS.flatMap((sec) => sec.items).map((item) => [
+      cardKey(item),
       {
+        item,
         owned: h('span', {}),
-        buy: w.unlimited
+        buy: item.free
           ? null
-          : h('button', { class: 'btn btn-small', on: { click: () => void this.buy(w.id) } }, `Buy · ${w.cost}`),
+          : h('button', { class: 'btn btn-small', on: { click: () => void this.buy(item.category, item.id) } }, `Buy · ${item.cost}`),
       },
     ]),
   );
-  private grid = h(
-    'div',
-    { class: 'shop-grid' },
-    ...WEAPONS.map((w) => {
-      const card = this.cards.get(w.id)!;
-      return h(
+  private sections = SHOP_SECTIONS.map((sec) =>
+    h(
+      'section',
+      { class: 'shop-section' },
+      h('h3', {}, sec.title),
+      h(
         'div',
-        { class: 'weapon-card', style: `--c:#${w.color.toString(16).padStart(6, '0')}` },
-        h('div', { class: 'weapon-name' }, h('span', { class: 'weapon-dot' }), w.name),
-        h('p', { class: 'weapon-desc' }, w.description),
-        h('div', { class: 'weapon-stats' }, `DMG ${w.damage} · Blast ${w.explosionRadius} · Crater ${w.craterRadius}`),
-        h('div', { class: 'weapon-buy' }, card.owned, card.buy ?? h('span', { class: 'badge' }, 'FREE')),
-      );
-    }),
+        { class: 'shop-grid' },
+        ...sec.items.map((item) => {
+          const card = this.cards.get(cardKey(item))!;
+          return h(
+            'div',
+            { class: 'weapon-card', style: `--c:${hex(item.color)}` },
+            h('div', { class: 'weapon-name' }, h('span', { class: 'weapon-dot' }), item.name),
+            h('p', { class: 'weapon-desc' }, item.description),
+            h('div', { class: 'weapon-stats' }, item.stats),
+            h('div', { class: 'weapon-buy' }, card.owned, card.buy ?? h('span', { class: 'badge' }, 'FREE')),
+          );
+        }),
+      ),
+    ),
   );
   private readyList = h('div', { class: 'ready-list' });
   private readyBtn = h('button', { class: 'btn btn-primary btn-big' });
@@ -50,7 +61,7 @@ export class ShopPage implements Page {
       'div',
       { class: 'page shop' },
       h('div', { class: 'card' }, this.heading, this.results),
-      h('div', { class: 'card' }, h('div', { class: 'shop-head' }, h('h2', {}, 'Shop'), this.points), this.grid),
+      h('div', { class: 'card' }, h('div', { class: 'shop-head' }, h('h2', {}, 'Shop'), this.points), ...this.sections),
       h('div', { class: 'shop-footer' }, this.readyList, this.readyBtn),
     );
     this.update();
@@ -66,11 +77,10 @@ export class ShopPage implements Page {
     replaceChildren(this.results, res ? resultsTable(res, room.players) : null);
     this.points.textContent = `${me.points} pts`;
 
-    for (const w of WEAPONS) {
-      const card = this.cards.get(w.id)!;
-      const owned = ownedCount(me.inventory, w.id);
-      card.owned.textContent = owned === Infinity ? 'Owned: ∞' : `Owned: ${owned}`;
-      if (card.buy) card.buy.disabled = me.points < w.cost;
+    for (const { item, owned, buy } of this.cards.values()) {
+      const count = ownedOf(me, item.category, item.id);
+      owned.textContent = count === Infinity ? 'Owned: ∞' : item.max !== undefined ? `Owned: ${count} / ${item.max}` : `Owned: ${count}`;
+      if (buy) buy.disabled = me.points < item.cost || (item.max !== undefined && count >= item.max);
     }
 
     replaceChildren(
@@ -85,8 +95,8 @@ export class ShopPage implements Page {
     this.readyBtn.classList.toggle('btn-primary', !me.ready);
   }
 
-  private async buy(weaponId: string): Promise<void> {
-    const res = await api.buy(weaponId);
+  private async buy(category: ShopCategory, itemId: string): Promise<void> {
+    const res = await api.buy(category, itemId);
     if (res.ok) sounds.play('buy');
     else toast(res.error, 'error');
   }

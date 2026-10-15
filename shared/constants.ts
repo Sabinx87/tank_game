@@ -61,7 +61,15 @@ export const MAX_ANGLE = 180;
 /** Degrees per second the muzzle rotates while a key is held. */
 export const AIM_SPEED = 60;
 export const MIN_POWER = 5;
-export const MAX_POWER = 100;
+/** Highest power an undamaged tank can fire with. */
+export const BASE_MAX_POWER = 100;
+/** Absolute upper bound for power on the wire (= BASE_MAX_POWER). */
+export const MAX_POWER = BASE_MAX_POWER;
+/**
+ * Damage weakens the gun: maxPower = BASE_MAX_POWER × (F + (1 − F) × health / MAX_HEALTH).
+ * With F = 0.5 a nearly dead tank fires at about half power.
+ */
+export const MIN_POWER_FACTOR = 0.5;
 /** Power units per second while W/S is held. */
 export const POWER_CHANGE_SPEED = 40;
 /** Launch speed (px/s) = power * POWER_TO_SPEED. */
@@ -73,6 +81,32 @@ export const FALL_DAMAGE_THRESHOLD = 40;
 export const FALL_DAMAGE_PER_PIXEL = 0.25;
 /** Explosions use distance to the tank's body, so a hit "on the edge" still counts. */
 export const TANK_HIT_RADIUS = 14;
+
+// ---------------------------------------------------------------- damage
+/**
+ * A direct hit (projectile touches the tank, or explodes this close to the tank's
+ * centre) deals the weapon's damage × DIRECT_HIT_MULTIPLIER, with no falloff.
+ */
+export const DIRECT_HIT_MULTIPLIER = 2.0;
+export const DIRECT_HIT_DISTANCE = 16;
+/**
+ * Near hits: damage × (1 − distance / explosionRadius) ^ DAMAGE_FALLOFF_EXPONENT.
+ * 1 = linear, 2 = quadratic (closer = much more damage).
+ */
+export const DAMAGE_FALLOFF_EXPONENT = 2;
+/** Whether shields also soak up fall damage (not just explosions). */
+export const SHIELDS_ABSORB_FALL_DAMAGE = true;
+
+// ---------------------------------------------------------------- repair kits
+/** Charges a player can hold. Everyone starts each game with a full bar. */
+export const REPAIR_KIT_CAPACITY = 3;
+/** Shop price of one charge. */
+export const REPAIR_KIT_PRICE = 50;
+/** maxPower restored by one charge (capped at BASE_MAX_POWER). */
+export const REPAIR_KIT_POWER_RESTORE = 25;
+/** Optionally a charge also heals the tank. */
+export const REPAIR_KIT_RESTORES_HEALTH = false;
+export const REPAIR_KIT_HEALTH_RESTORE = 15;
 
 // ---------------------------------------------------------------- turns & rounds
 export const TURN_TIME_MS = 30_000;
@@ -98,6 +132,14 @@ export const DEFAULT_WEAPON_ID = 'volcano';
 export const STARTING_INVENTORY: Record<string, number> = {
   shower: 1,
 };
+/** Shields every player starts the game with (shieldId -> count). */
+export const STARTING_SHIELDS: Record<string, number> = {};
+
+// ---------------------------------------------------------------- maps
+/** Map used when the host hasn't picked one. Must exist in maps.ts. */
+export const DEFAULT_MAP_ID = 'classic';
+/** Special lobby choice: a different random map every round. */
+export const RANDOM_MAP_ID = 'random';
 
 // ---------------------------------------------------------------- client visuals
 /** Cloud drift speed in px/s per px/s² of wind. */
@@ -105,6 +147,8 @@ export const CLOUD_SPEED_PER_WIND = 1.5;
 export const CLOUD_COUNT = 7;
 /** How often (ms) the client sends aim updates while aiming. */
 export const AIM_SEND_INTERVAL_MS = 50;
+/** Shield bubble radius (px) around a tank at full shield HP. */
+export const SHIELD_BUBBLE_RADIUS = 34;
 
 // ---------------------------------------------------------------- players
 export const PLAYER_COLORS = [

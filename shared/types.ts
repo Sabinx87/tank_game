@@ -4,6 +4,7 @@
  * these interfaces as Socket.IO generics, so a typo is a compile error.
  */
 import type { PLAYER_COLORS } from './constants';
+import type { ShopCategory } from './shop';
 
 export type ColorId = (typeof PLAYER_COLORS)[number]['id'];
 
@@ -12,14 +13,22 @@ export type Phase = 'lobby' | 'playing' | 'roundEnd' | 'finished';
 /** weaponId -> count. Unlimited weapons are not stored (see weapons.ts). */
 export type Inventory = Record<string, number>;
 
-export interface PlayerInfo {
+/** Everything a player can own and buy in the shop. */
+export interface Holdings {
+  inventory: Inventory;
+  /** shieldId -> count of unused shields. */
+  shields: Record<string, number>;
+  /** Repair kit charges (0 … REPAIR_KIT_CAPACITY). */
+  repairKits: number;
+}
+
+export interface PlayerInfo extends Holdings {
   id: string;
   name: string;
   color: ColorId | null;
   isHost: boolean;
   connected: boolean;
   points: number;
-  inventory: Inventory;
   /** Shop "Ready" flag between rounds. */
   ready: boolean;
 }
@@ -48,8 +57,17 @@ export interface RoomState {
   players: PlayerInfo[];
   round: number;
   totalRounds: number;
+  /** Map chosen by the host in the waiting room (a map id or RANDOM_MAP_ID). */
+  mapId: string;
   /** Results of the last finished round (shown on the shop / final screens). */
   lastRoundResults: RoundResults | null;
+}
+
+/** A shield that has been switched on and is soaking up damage. */
+export interface ActiveShield {
+  shieldId: string;
+  /** Remaining shield HP. The shield disappears at 0. */
+  hp: number;
 }
 
 export interface TankState {
@@ -62,17 +80,31 @@ export interface TankState {
   /** Degrees: 0 = right, 90 = up, 180 = left. */
   angle: number;
   power: number;
+  /** Highest power this tank can fire with right now (drops with damage, raised by repair kits). */
+  maxPower: number;
+  shield: ActiveShield | null;
   /** Remaining horizontal movement this turn (px). */
   fuel: number;
   /** Currently selected weapon (so others can see it). */
   weaponId: string;
 }
 
+/** A purely decorative object standing on the ground (tree, cactus, rock…). */
+export interface Decoration {
+  /** Key into the client's decoration drawers (see maps.ts DecorationKind). */
+  kind: string;
+  x: number;
+  scale: number;
+}
+
 export interface GameState {
   round: number;
   totalRounds: number;
+  /** The map actually being played this round (never RANDOM_MAP_ID). */
+  mapId: string;
   /** Heightmap: terrain[x] = y of the ground surface at column x. */
   terrain: number[];
+  decorations: Decoration[];
   tanks: TankState[];
   turnOrder: string[];
   currentPlayerId: string | null;
@@ -83,16 +115,8 @@ export interface GameState {
   shotInProgress: boolean;
 }
 
-/** Small, frequent update for one tank (driving / aiming). */
-export interface TankUpdate {
-  playerId: string;
-  x: number;
-  y: number;
-  angle: number;
-  power: number;
-  fuel: number;
-  weaponId: string;
-}
+/** Frequent update for one tank (driving, aiming, repairing, shielding). */
+export type TankUpdate = TankState;
 
 // ---------------------------------------------------------------- shots
 
@@ -113,7 +137,14 @@ export interface ProjectileTrack {
 
 export interface DamageEvent {
   playerId: string;
+  /** Damage that reached the tank's health. */
   amount: number;
+  /** Damage soaked up by an active shield. */
+  absorbed: number;
+  /** This hit popped the tank's shield. */
+  shieldBroken: boolean;
+  /** Direct hit (body hit or blast right on the tank) — used for the "DIRECT HIT!" label. */
+  direct: boolean;
   /** Who caused it (the shooter). */
   sourceId: string;
   cause: 'explosion' | 'fall';
@@ -129,7 +160,7 @@ export interface ExplosionEvent {
   craterRadius: number;
   damage: DamageEvent[];
   /** Tank positions/health right after this explosion (and any falling). */
-  tanks: Pick<TankState, 'playerId' | 'x' | 'y' | 'health' | 'alive'>[];
+  tanks: Pick<TankState, 'playerId' | 'x' | 'y' | 'health' | 'alive' | 'maxPower' | 'shield'>[];
   /** Tanks destroyed by this explosion. */
   killed: string[];
 }
@@ -165,6 +196,8 @@ export interface ClientToServerEvents {
   'room:leave': () => void;
   'room:profile': (payload: { name?: string; color?: ColorId }, ack: Ack<null>) => void;
   'room:start': (ack: Ack<null>) => void;
+  /** Host only, in the waiting room: a map id or RANDOM_MAP_ID. */
+  'room:map': (payload: { mapId: string }, ack: Ack<null>) => void;
   /** Host only, after the final leaderboard: everyone goes back to the waiting room. */
   'room:backToLobby': () => void;
 
@@ -172,8 +205,12 @@ export interface ClientToServerEvents {
   'game:move': (payload: { dir: -1 | 0 | 1 }) => void;
   'game:aim': (payload: { angle: number; power: number; weaponId: string }) => void;
   'game:fire': (payload: { angle: number; power: number; weaponId: string }, ack: Ack<null>) => void;
+  /** Use one repair kit charge (does not end the turn). */
+  'game:repair': (ack: Ack<null>) => void;
+  /** Switch on one owned shield (does not end the turn). */
+  'game:shield': (payload: { shieldId: string }, ack: Ack<null>) => void;
 
-  'shop:buy': (payload: { weaponId: string }, ack: Ack<null>) => void;
+  'shop:buy': (payload: { category: ShopCategory; itemId: string }, ack: Ack<null>) => void;
   'shop:ready': (payload: { ready: boolean }) => void;
 }
 

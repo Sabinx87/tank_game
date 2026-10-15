@@ -1,52 +1,57 @@
 import Phaser from 'phaser';
 import { WORLD_HEIGHT, WORLD_WIDTH } from '@shared/constants';
+import type { MapDef } from '@shared/maps';
+import type { Decoration } from '@shared/types';
+import { paintDecorations, paintGround, paintSky } from './mapArt';
 
-const KEY = 'terrain-canvas';
+/** A full-screen canvas texture we repaint by hand. */
+class CanvasLayer {
+  readonly texture: Phaser.Textures.CanvasTexture;
 
-/** Draws the heightmap into a canvas texture. Redrawn whenever a crater is carved. */
-export class TerrainRenderer {
-  private readonly texture: Phaser.Textures.CanvasTexture;
-
-  constructor(scene: Phaser.Scene, depth: number) {
-    if (scene.textures.exists(KEY)) scene.textures.remove(KEY);
-    this.texture = scene.textures.createCanvas(KEY, WORLD_WIDTH, WORLD_HEIGHT)!;
-    scene.add.image(0, 0, KEY).setOrigin(0).setDepth(depth);
+  constructor(scene: Phaser.Scene, key: string, depth: number) {
+    if (scene.textures.exists(key)) scene.textures.remove(key);
+    this.texture = scene.textures.createCanvas(key, WORLD_WIDTH, WORLD_HEIGHT)!;
+    scene.add.image(0, 0, key).setOrigin(0).setDepth(depth);
   }
 
-  draw(terrain: number[]): void {
+  paint(fn: (ctx: CanvasRenderingContext2D) => void): void {
     const ctx = this.texture.context;
     ctx.clearRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-    if (terrain.length === 0) {
-      this.texture.refresh();
-      return;
-    }
-
-    const top = Math.min(...terrain);
-    const fill = ctx.createLinearGradient(0, top, 0, WORLD_HEIGHT);
-    fill.addColorStop(0, '#8a6a3f');
-    fill.addColorStop(0.35, '#6b4f2c');
-    fill.addColorStop(1, '#3b2a18');
-
-    ctx.beginPath();
-    ctx.moveTo(0, WORLD_HEIGHT);
-    for (let x = 0; x < terrain.length; x++) ctx.lineTo(x, terrain[x]);
-    ctx.lineTo(terrain.length - 1, WORLD_HEIGHT);
-    ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
-
-    // Grass along the surface.
-    ctx.beginPath();
-    ctx.moveTo(0, terrain[0]);
-    for (let x = 1; x < terrain.length; x++) ctx.lineTo(x, terrain[x]);
-    ctx.lineJoin = 'round';
-    ctx.strokeStyle = '#3f7d2a';
-    ctx.lineWidth = 9;
-    ctx.stroke();
-    ctx.strokeStyle = '#6fbf3f';
-    ctx.lineWidth = 4;
-    ctx.stroke();
-
+    fn(ctx);
     this.texture.refresh();
+  }
+}
+
+/** Sky gradient + sun for the current map. Repainted only when the map changes. */
+export class SkyRenderer {
+  private readonly layer: CanvasLayer;
+  private mapId = '';
+
+  constructor(scene: Phaser.Scene, depth: number) {
+    this.layer = new CanvasLayer(scene, 'sky-canvas', depth);
+  }
+
+  draw(map: MapDef): void {
+    if (map.id === this.mapId) return;
+    this.mapId = map.id;
+    this.layer.paint((ctx) => paintSky(ctx, map));
+  }
+}
+
+/** Draws the heightmap (and decorations) into a canvas texture. Redrawn whenever a crater is carved. */
+export class TerrainRenderer {
+  private readonly layer: CanvasLayer;
+
+  constructor(scene: Phaser.Scene, depth: number) {
+    this.layer = new CanvasLayer(scene, 'terrain-canvas', depth);
+  }
+
+  draw(terrain: number[], map: MapDef, decorations: Decoration[]): void {
+    this.layer.paint((ctx) => {
+      if (terrain.length === 0) return;
+      // Decorations first: the ground fill and grass hide their roots.
+      paintDecorations(ctx, decorations, terrain);
+      paintGround(ctx, terrain, map);
+    });
   }
 }

@@ -1,4 +1,5 @@
 import {
+  DEFAULT_MAP_ID,
   DEFAULT_ROUNDS,
   EMPTY_ROOM_TTL_MS,
   LOBBY_DISCONNECT_GRACE_MS,
@@ -14,13 +15,16 @@ import {
   SERVER_TICK_HZ,
   TURN_TIME_MS,
 } from '@shared/constants';
+import { isMapChoice, resolveMap } from '@shared/maps';
+import { getShield } from '@shared/shields';
+import { buyItem, isShopCategory } from '@shared/shop';
 import type { AckResult, ColorId, GameState, JoinedRoom, Phase, RoomState, RoundResults } from '@shared/types';
 import { getWeapon } from '@shared/weapons';
 import type { GameSocket, IO } from './io';
 import { Player } from './Player';
 import { Battlefield } from './systems/Battlefield';
 import { Scoring } from './systems/Scoring';
-import { buyWeapon, canUseWeapon, consumeWeapon } from './systems/Shop';
+import { canUseWeapon, consumeShield, consumeWeapon } from './systems/Shop';
 import { TurnSystem } from './systems/TurnSystem';
 import { cleanName, isColorId, isFiniteNumber, isMoveDir, isWeaponId } from './validation';
 
@@ -38,6 +42,8 @@ export class GameRoom {
   round = 0;
   totalRounds = Number(process.env.ROUNDS) || DEFAULT_ROUNDS;
   lastRoundResults: RoundResults | null = null;
+  /** Host's map choice (a map id or RANDOM_MAP_ID); Random is resolved again every round. */
+  mapId = DEFAULT_MAP_ID;
 
   private battlefield: Battlefield | null = null;
   private readonly turns = new TurnSystem();
@@ -226,6 +232,15 @@ export class GameRoom {
     return ok(null);
   }
 
+  setMap(playerId: string, mapId: unknown): AckResult<null> {
+    if (playerId !== this.hostId) return fail('Only the host can choose the map');
+    if (this.phase !== 'lobby') return fail('The map can only be changed in the waiting room');
+    if (!isMapChoice(mapId)) return fail('Unknown map');
+    this.mapId = mapId;
+    this.broadcastRoom();
+    return ok(null);
+  }
+
   /** Why the game can't start yet, or null if it can. */
   startBlocker(): string | null {
     const present = [...this.players.values()].filter((p) => p.connected);
@@ -272,7 +287,7 @@ export class GameRoom {
 
   private startRound(): void {
     const ids = [...this.players.keys()];
-    this.battlefield = new Battlefield(ids);
+    this.battlefield = new Battlefield(ids, resolveMap(this.mapId));
     this.turns.startRound(ids);
     this.scoring.startRound(ids);
     for (const p of this.players.values()) p.ready = false;
@@ -364,6 +379,9 @@ export class GameRoom {
     const { angle, power, weaponId } = payload;
     if (!isFiniteNumber(angle) || angle < MIN_ANGLE || angle > MAX_ANGLE) return fail('Angle out of range');
     if (!isFiniteNumber(power) || power < MIN_POWER || power > MAX_POWER) return fail('Power out of range');
+    const maxPower = bf.tanks.get(playerId)!.maxPower;
+    // Small tolerance: the client sends power rounded to 0.1.
+    if (power > maxPower + 0.05) return fail(`Your damaged tank can only fire up to power ${Math.floor(maxPower)}`);
     if (!isWeaponId(weaponId)) return fail('Unknown weapon');
     if (!canUseWeapon(player, weaponId)) return fail("You don't have that weapon");
 
@@ -383,14 +401,43 @@ export class GameRoom {
     return ok(null);
   }
 
+  /** Use one repair kit charge. Doesn't end the turn. */
+  repair(playerId: string): AckResult<null> {
+    const bf = this.canAct(playerId);
+    const player = this.players.get(playerId);
+    if (!bf || !player) return fail("It's not your turn");
+    if (player.repairKits <= 0) return fail('No repair kit charges left');
+    const error = bf.repair(playerId);
+    if (error) return fail(error);
+    player.repairKits -= 1;
+    this.io.to(this.channel).emit('game:tank', { ...bf.tanks.get(playerId)! });
+    this.broadcastRoom(); // repair kits changed
+    return ok(null);
+  }
+
+  /** Switch on an owned shield. Doesn't end the turn. */
+  activateShield(playerId: string, shieldId: unknown): AckResult<null> {
+    const bf = this.canAct(playerId);
+    const player = this.players.get(playerId);
+    if (!bf || !player) return fail("It's not your turn");
+    if (typeof shieldId !== 'string' || !getShield(shieldId)) return fail('Unknown shield');
+    if ((player.shields[shieldId] ?? 0) <= 0) return fail("You don't have that shield");
+    const error = bf.activateShield(playerId, shieldId);
+    if (error) return fail(error);
+    consumeShield(player, shieldId);
+    this.io.to(this.channel).emit('game:tank', { ...bf.tanks.get(playerId)! });
+    this.broadcastRoom(); // shields changed
+    return ok(null);
+  }
+
   // ================================================================ shop
 
-  buy(playerId: string, weaponId: unknown): AckResult<null> {
+  buy(playerId: string, category: unknown, itemId: unknown): AckResult<null> {
     if (this.phase !== 'roundEnd') return fail('The shop is closed');
     const player = this.players.get(playerId);
     if (!player) return fail('You are not in this room');
-    if (!isWeaponId(weaponId)) return fail('Unknown weapon');
-    const error = buyWeapon(player, weaponId);
+    if (!isShopCategory(category) || typeof itemId !== 'string') return fail('Unknown item');
+    const error = buyItem(player, category, itemId);
     if (error) return fail(error);
     this.broadcastRoom();
     return ok(null);
@@ -414,6 +461,7 @@ export class GameRoom {
       players: [...this.players.values()].map((p) => p.toInfo(this.hostId)),
       round: this.round,
       totalRounds: this.totalRounds,
+      mapId: this.mapId,
       lastRoundResults: this.lastRoundResults,
     };
   }
@@ -423,8 +471,10 @@ export class GameRoom {
     return {
       round: this.round,
       totalRounds: this.totalRounds,
+      mapId: bf.map.id,
       terrain: bf.terrain,
-      tanks: [...bf.tanks.values()].map((t) => ({ ...t })),
+      decorations: bf.decorations,
+      tanks: [...bf.tanks.values()].map((t) => ({ ...t, shield: t.shield ? { ...t.shield } : null })),
       turnOrder: this.turns.order,
       currentPlayerId: this.turns.currentPlayerId,
       wind: bf.wind,

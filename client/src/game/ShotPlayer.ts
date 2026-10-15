@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { trackPositionAt } from '@shared/physics';
 import type { ExplosionEvent, ShotResult } from '@shared/types';
+import { getWeapon } from '@shared/weapons';
 
 const TRAIL_SECONDS = 0.35;
 const TRAIL_DOTS = 8;
@@ -44,10 +45,26 @@ export class ShotPlayer {
     for (const track of this.shot.projectiles) {
       const pos = trackPositionAt(track, this.t);
       if (!pos) continue;
-      // Fading trail
-      for (let i = TRAIL_DOTS; i >= 1; i--) {
-        const p = trackPositionAt(track, Math.max(track.startTime, this.t - (TRAIL_SECONDS * i) / TRAIL_DOTS));
-        if (p) g.fillStyle(track.color, 0.35 * (1 - i / (TRAIL_DOTS + 1))).fillCircle(p.x, p.y, track.radius * 0.7);
+      const fancy = getWeapon(track.weaponId)?.trail;
+      if (fancy) {
+        // Weapon-specific trail: colours blend from head to tail, dots grow then shrink.
+        const dots = TRAIL_DOTS * 2;
+        for (let i = dots; i >= 1; i--) {
+          const p = trackPositionAt(track, Math.max(track.startTime, this.t - (fancy.seconds * i) / dots));
+          if (!p) continue;
+          const k = i / (dots + 1);
+          const color = fancy.colors[Math.min(fancy.colors.length - 1, Math.floor(k * fancy.colors.length))];
+          const flicker = 0.85 + Math.random() * 0.3;
+          const r = track.radius * fancy.size * (1 - k * 0.6) * flicker;
+          g.fillStyle(fancy.colors[fancy.colors.length - 1], 0.18 * (1 - k)).fillCircle(p.x, p.y, r * 1.9); // glow
+          g.fillStyle(color, 0.95 * (1 - k * 0.8)).fillCircle(p.x, p.y, r);
+        }
+      } else {
+        // Fading trail
+        for (let i = TRAIL_DOTS; i >= 1; i--) {
+          const p = trackPositionAt(track, Math.max(track.startTime, this.t - (TRAIL_SECONDS * i) / TRAIL_DOTS));
+          if (p) g.fillStyle(track.color, 0.35 * (1 - i / (TRAIL_DOTS + 1))).fillCircle(p.x, p.y, track.radius * 0.7);
+        }
       }
       if (pos.y < 0) {
         // Above the screen: show an arrow marker at the top edge.

@@ -1,9 +1,9 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { STARTING_INVENTORY, STARTING_POINTS } from '@shared/constants';
-import type { ColorId, Inventory, PlayerInfo } from '@shared/types';
+import { REPAIR_KIT_CAPACITY, STARTING_INVENTORY, STARTING_POINTS, STARTING_SHIELDS } from '@shared/constants';
+import type { ColorId, Holdings, Inventory, PlayerInfo } from '@shared/types';
 
 /** Server-side record of a seat in a room. The token is secret and never broadcast. */
-export class Player {
+export class Player implements Holdings {
   readonly id = randomUUID();
   readonly token = randomBytes(18).toString('base64url');
   socketId: string | null;
@@ -11,6 +11,9 @@ export class Player {
   color: ColorId | null = null;
   points = STARTING_POINTS;
   inventory: Inventory = { ...STARTING_INVENTORY };
+  shields: Record<string, number> = { ...STARTING_SHIELDS };
+  /** Everyone starts a game with a full repair kit bar. */
+  repairKits = REPAIR_KIT_CAPACITY;
   ready = false;
   /** Epoch ms when the socket dropped; null while connected. */
   disconnectedAt: number | null = null;
@@ -32,6 +35,8 @@ export class Player {
   resetForNewGame(): void {
     this.points = STARTING_POINTS;
     this.inventory = { ...STARTING_INVENTORY };
+    this.shields = { ...STARTING_SHIELDS };
+    this.repairKits = REPAIR_KIT_CAPACITY;
     this.ready = false;
   }
 
@@ -44,6 +49,8 @@ export class Player {
       connected: this.connected,
       points: this.points,
       inventory: { ...this.inventory },
+      shields: { ...this.shields },
+      repairKits: this.repairKits,
       ready: this.ready,
     };
   }

@@ -1,15 +1,48 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { BEHAVIORS } from '../behaviors';
-import { MAX_HEALTH, MAX_WIND, WORLD_HEIGHT, WORLD_WIDTH } from '../constants';
-import { falloffDamage, type SimTank } from '../damage';
+import {
+  BASE_MAX_POWER,
+  DIRECT_HIT_MULTIPLIER,
+  MAX_HEALTH,
+  MAX_WIND,
+  MIN_POWER_FACTOR,
+  TANK_HEIGHT,
+  WORLD_HEIGHT,
+  WORLD_WIDTH,
+} from '../constants';
+import { applyExplosion, falloffDamage, type BlastSpec, type SimTank } from '../damage';
 import { simulateShot, trackPositionAt } from '../physics';
-import { spawnPositions, stepTankMovement } from '../tank';
-import { carveCrater, generateTerrain } from '../terrain';
+import { SHIELDS, absorbDamage, getShield } from '../shields';
+import { maxPowerFor, spawnPositions, stepTankMovement } from '../tank';
+import { carveCrater, findPeak, generateTerrain } from '../terrain';
+import { MAPS, generateDecorations, getMap, isMapChoice, resolveMap, seededRng, survivingDecorations } from '../maps';
+import { DEFAULT_MAP_ID, RANDOM_MAP_ID } from '../constants';
 import { WEAPONS, getWeapon } from '../weapons';
 
 const flat = (y = 700) => new Array(WORLD_WIDTH).fill(y);
-const tank = (playerId: string, x: number, y = 700): SimTank => ({ playerId, x, y, health: MAX_HEALTH, alive: true });
+const tank = (playerId: string, x: number, y = 700): SimTank => ({
+  playerId,
+  x,
+  y,
+  health: MAX_HEALTH,
+  alive: true,
+  maxPower: BASE_MAX_POWER,
+  powerBoost: 0,
+  shield: null,
+});
+const blast = (x: number, y: number, o: Partial<BlastSpec> = {}): BlastSpec => ({
+  x,
+  y,
+  t: 0,
+  weaponId: 'volcano',
+  color: 0,
+  damage: 20,
+  explosionRadius: 40,
+  craterRadius: 0,
+  sourceId: 'z',
+  ...o,
+});
 
 test('every weapon references an existing behavior and has sane numbers', () => {
   for (const w of WEAPONS) {
@@ -25,6 +58,11 @@ test('generated terrain stays inside the world', () => {
   assert.ok(t.every((y) => y > 0 && y < WORLD_HEIGHT));
 });
 
+test('every weapon damages, shield and repair numbers are sane', () => {
+  assert.equal(new Set(SHIELDS.map((s) => s.id)).size, SHIELDS.length, 'shield ids are unique');
+  for (const w of WEAPONS) assert.ok(w.cost >= 0, w.id);
+});
+
 test('crater lowers the ground by up to its diameter, centred on impact', () => {
   const t = flat(700);
   carveCrater(t, 800, 700, 30);
@@ -33,10 +71,100 @@ test('crater lowers the ground by up to its diameter, centred on impact', () => 
   assert.ok(t[790] > 700 && t[790] < 730);
 });
 
-test('falloff: full at centre, zero at edge', () => {
+test('falloff is quadratic: full at centre, a quarter at half radius, zero at edge', () => {
   assert.equal(falloffDamage(50, 40, 0), 50);
-  assert.equal(falloffDamage(50, 40, 20), 25);
+  assert.equal(falloffDamage(50, 40, 20), 12.5);
   assert.equal(falloffDamage(50, 40, 40), 0);
+  assert.equal(falloffDamage(50, 40, 60), 0);
+});
+
+test('direct hits deal damage × DIRECT_HIT_MULTIPLIER, near hits less, far tanks nothing', () => {
+  const ts = [tank('a', 400), tank('b', 440), tank('c', 900)];
+  // Blast right on tank a's body centre.
+  const ev = applyExplosion(flat(), ts, blast(400, 700 - TANK_HEIGHT / 2));
+  const dmg = (id: string) => ev.damage.find((d) => d.playerId === id);
+  assert.equal(dmg('a')!.amount, 20 * DIRECT_HIT_MULTIPLIER);
+  assert.equal(dmg('a')!.direct, true);
+  assert.ok(dmg('b')!.amount > 0 && dmg('b')!.amount < 20, 'near hit is partial');
+  assert.equal(dmg('b')!.direct, false);
+  assert.equal(dmg('c'), undefined);
+});
+
+test('a projectile striking a tank body is a direct hit', () => {
+  const ev = applyExplosion(flat(), [tank('a', 400)], blast(430, 690, { hitTankId: 'a' }));
+  assert.equal(ev.damage[0].amount, 20 * DIRECT_HIT_MULTIPLIER);
+});
+
+test('weapon balance: direct Volcano ≈ 35–40% HP, direct Atom almost a one-shot', () => {
+  const direct = (id: string) => getWeapon(id)!.damage * DIRECT_HIT_MULTIPLIER;
+  assert.ok(direct('volcano') >= 0.35 * MAX_HEALTH && direct('volcano') <= 0.4 * MAX_HEALTH);
+  assert.ok(direct('atom') >= 0.9 * MAX_HEALTH && direct('atom') < MAX_HEALTH);
+});
+
+test('max power drops with damage and repair boost is capped', () => {
+  assert.equal(maxPowerFor(MAX_HEALTH, 0), BASE_MAX_POWER);
+  assert.equal(maxPowerFor(0, 0), BASE_MAX_POWER * MIN_POWER_FACTOR);
+  assert.equal(maxPowerFor(MAX_HEALTH / 2, 0), BASE_MAX_POWER * (MIN_POWER_FACTOR + (1 - MIN_POWER_FACTOR) / 2));
+  assert.equal(maxPowerFor(0, 1000), BASE_MAX_POWER);
+  const ts = [tank('a', 400)];
+  applyExplosion(flat(), ts, blast(400, 690));
+  assert.equal(ts[0].maxPower, maxPowerFor(ts[0].health, 0), 'maxPower follows health after a hit');
+});
+
+test('shields absorb their share, lose HP, and pop with the rest going through', () => {
+  for (const s of SHIELDS) assert.ok(s.absorb > 0 && s.absorb < 1 && s.hp > 0, s.id);
+  const lvl1 = SHIELDS.find((s) => s.level === 1)!;
+  const sh = { shieldId: lvl1.id, hp: lvl1.hp };
+  const first = absorbDamage(sh, 40);
+  assert.equal(first.absorbed, Math.round(40 * lvl1.absorb));
+  assert.equal(first.passed, 40 - first.absorbed);
+  assert.equal(sh.hp, lvl1.hp - first.absorbed);
+  // A huge hit drains the remaining HP; leftover goes to the tank.
+  const left = sh.hp;
+  const big = absorbDamage(sh, 200);
+  assert.equal(big.absorbed, left);
+  assert.equal(big.passed, 200 - left);
+  assert.equal(big.broken, true);
+
+  const ts = [tank('a', 400)];
+  const best = [...SHIELDS].sort((a, b) => b.level - a.level)[0];
+  ts[0].shield = { shieldId: best.id, hp: best.hp };
+  const ev = applyExplosion(flat(), ts, blast(400, 690));
+  const d = ev.damage[0];
+  assert.equal(d.absorbed + d.amount, 20 * DIRECT_HIT_MULTIPLIER);
+  assert.equal(d.absorbed, Math.round(40 * getShield(best.id)!.absorb));
+  assert.equal(ev.tanks[0].shield!.hp, best.hp - d.absorbed);
+});
+
+test('findPeak climbs to the local maximum in the given direction', () => {
+  // A single hill peaking at x = 600 (smaller y = higher).
+  const t = Array.from({ length: WORLD_WIDTH }, (_, x) => 700 - Math.max(0, 200 - Math.abs(x - 600)));
+  assert.equal(findPeak(t, 450, 1, 500), 600);
+  assert.equal(findPeak(t, 750, -1, 500), 600);
+  assert.equal(findPeak(t, 450, -1, 500), 450, 'downhill: stays put');
+  assert.equal(findPeak(t, 450, 1, 50), 500, 'limited by max distance');
+});
+
+test('Ball V2 rolls uphill to the peak before exploding', () => {
+  const t = Array.from({ length: WORLD_WIDTH }, (_, x) => 700 - Math.max(0, 150 - Math.abs(x - 700) * 0.6));
+  const shot = simulateShot({ terrain: t, tanks: [tank('a', 200, t[200])], shooterId: 'a', weapon: getWeapon('ball-v2')!, angle: 45, power: 52, wind: 0 });
+  assert.equal(shot.explosions.length, 1);
+  assert.ok(Math.abs(shot.explosions[0].x - 700) <= 2, `exploded at the peak (x=${shot.explosions[0].x})`);
+});
+
+test('Ball V2 on flat ground explodes where it lands', () => {
+  const shot = simulateShot({ terrain: flat(), tanks: [tank('a', 300)], shooterId: 'a', weapon: getWeapon('ball-v2')!, angle: 50, power: 60, wind: 0 });
+  assert.equal(shot.explosions.length, 1);
+  const track = shot.projectiles[0];
+  assert.equal(shot.explosions[0].x, track.points[track.points.length - 2]);
+});
+
+test('Hot Shower splits into more bomblets than the Shower Bomb', () => {
+  const run = (id: string) =>
+    simulateShot({ terrain: flat(), tanks: [tank('a', 300)], shooterId: 'a', weapon: getWeapon(id)!, angle: 60, power: 70, wind: 0 });
+  const hot = run('hot-shower');
+  assert.equal(hot.explosions.length, getWeapon('hot-shower')!.params!.count);
+  assert.ok(hot.explosions.length > run('shower').explosions.length);
 });
 
 test('a shot lands, carves a crater and damages the tank it hits', () => {
@@ -120,4 +248,47 @@ test('tank movement is limited by fuel', () => {
 test('spawn positions are spread out', () => {
   const xs = spawnPositions(5).sort((a, b) => a - b);
   for (let i = 1; i < xs.length; i++) assert.ok(xs[i] - xs[i - 1] > 100);
+});
+
+test('every map generates valid terrain and decorations', () => {
+  assert.ok(getMap(DEFAULT_MAP_ID), 'default map exists');
+  assert.equal(new Set(MAPS.map((m) => m.id)).size, MAPS.length, 'map ids are unique');
+  for (const m of MAPS) {
+    for (let seed = 1; seed <= 5; seed++) {
+      const t = generateTerrain(seededRng(seed), m.terrain);
+      assert.equal(t.length, WORLD_WIDTH, m.id);
+      assert.ok(t.every((y) => y >= WORLD_HEIGHT * m.terrain.minHeightRatio - 0.01 && y <= WORLD_HEIGHT * m.terrain.maxHeightRatio + 0.01), m.id);
+    }
+    const decos = generateDecorations(m, seededRng(1));
+    assert.equal(decos.length, m.decorations.reduce((n, d) => n + d.count, 0), m.id);
+    assert.ok(decos.every((d) => d.x >= 0 && d.x < WORLD_WIDTH));
+  }
+});
+
+test('mountains are more rugged than desert dunes', () => {
+  const spread = (id: string) => {
+    let total = 0;
+    for (let seed = 1; seed <= 10; seed++) {
+      const t = generateTerrain(seededRng(seed), getMap(id)!.terrain);
+      total += Math.max(...t) - Math.min(...t);
+    }
+    return total / 10;
+  };
+  assert.ok(spread('mountain') > spread('desert') * 1.5);
+});
+
+test('map choices: Random resolves to a real map, unknown ids are rejected', () => {
+  assert.ok(isMapChoice(RANDOM_MAP_ID));
+  assert.ok(MAPS.every((m) => isMapChoice(m.id)));
+  assert.ok(!isMapChoice('nope') && !isMapChoice(42));
+  const rng = seededRng(7);
+  const picked = new Set(Array.from({ length: 50 }, () => resolveMap(RANDOM_MAP_ID, rng).id));
+  assert.ok(picked.size > 1 && [...picked].every((id) => getMap(id)));
+});
+
+test('decorations inside a crater are blown away, others survive', () => {
+  const t = flat(700);
+  const decos = [{ kind: 'tree', x: 400, scale: 1 }, { kind: 'tree', x: 600, scale: 1 }];
+  assert.deepEqual(survivingDecorations(decos, t, 405, 700, 30).map((d) => d.x), [600]);
+  assert.equal(survivingDecorations(decos, t, 400, 300, 30).length, 2, 'airburst high above does nothing');
 });

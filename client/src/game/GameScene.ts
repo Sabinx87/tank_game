@@ -2,14 +2,19 @@ import Phaser from 'phaser';
 import {
   AIM_SEND_INTERVAL_MS,
   AIM_SPEED,
+  DEFAULT_MAP_ID,
   DEFAULT_WEAPON_ID,
+  MAX_POWER,
   POWER_CHANGE_SPEED,
+  SHIELD_BUBBLE_RADIUS,
   WORLD_HEIGHT,
   WORLD_WIDTH,
 } from '@shared/constants';
+import { getMap, survivingDecorations, type MapDef } from '@shared/maps';
+import { getShield, ownedShields } from '@shared/shields';
 import { barrelTip, clampAngle, clampPower } from '@shared/tank';
 import { carveCrater } from '@shared/terrain';
-import type { ExplosionEvent, GameState, ShotResult, TankUpdate } from '@shared/types';
+import type { Decoration, ExplosionEvent, GameState, ShotResult, TankState, TankUpdate } from '@shared/types';
 import { getWeapon, ownedCount } from '@shared/weapons';
 import { sounds } from '../audio/sounds';
 import { toast } from '../dom';
@@ -19,7 +24,8 @@ import { Clouds } from './Clouds';
 import { Effects } from './Effects';
 import { ShotPlayer } from './ShotPlayer';
 import { TankSprite } from './TankSprite';
-import { TerrainRenderer } from './TerrainRenderer';
+import { SkyRenderer, TerrainRenderer } from './TerrainRenderer';
+import { ActionBar } from './ui/ActionBar';
 import { FuelBar } from './ui/FuelBar';
 import { HealthBars } from './ui/HealthBars';
 import { PowerMeter } from './ui/PowerMeter';
@@ -30,7 +36,7 @@ import { WindIndicator } from './ui/WindIndicator';
 
 const DEPTH = { sky: 0, clouds: 1, terrain: 2, tanks: 3, projectiles: 4, effects: 5 };
 
-type Keys = Record<'left' | 'right' | 'up' | 'down' | 'w' | 's' | 'space' | 'enter' | 'shift', Phaser.Input.Keyboard.Key>;
+type Keys = Record<'left' | 'right' | 'up' | 'down' | 'w' | 's' | 'r' | 'e' | 'space' | 'enter' | 'shift', Phaser.Input.Keyboard.Key>;
 
 /**
  * The battlefield. Renders whatever the server says, animates shots, and
@@ -39,9 +45,12 @@ type Keys = Record<'left' | 'right' | 'up' | 'down' | 'w' | 's' | 'space' | 'ent
 export class GameScene extends Phaser.Scene {
   private state: GameState | null = null;
   private terrain: number[] = [];
+  private map: MapDef = getMap(DEFAULT_MAP_ID)!;
+  private decorations: Decoration[] = [];
   private readonly tanks = new Map<string, TankSprite>();
   private shot: ShotPlayer | null = null;
 
+  private sky!: SkyRenderer;
   private terrainRenderer!: TerrainRenderer;
   private clouds!: Clouds;
   private effects!: Effects;
@@ -52,6 +61,7 @@ export class GameScene extends Phaser.Scene {
   private powerMeter!: PowerMeter;
   private fuelBar!: FuelBar;
   private weaponPicker!: WeaponPicker;
+  private actionBar!: ActionBar;
   private keys!: Keys;
 
   /** My aim, predicted locally while it's my turn (the server validates on fire). */
@@ -69,10 +79,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   create(): void {
-    const sky = this.add.graphics().setDepth(DEPTH.sky);
-    sky.fillGradientStyle(0x2b5876, 0x2b5876, 0x8fc6e8, 0x8fc6e8, 1).fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-    this.add.circle(WORLD_WIDTH * 0.82, 150, 46, 0xfff4c2, 0.9).setDepth(DEPTH.sky);
-
+    this.sky = new SkyRenderer(this, DEPTH.sky);
     this.clouds = new Clouds(this, DEPTH.clouds);
     this.terrainRenderer = new TerrainRenderer(this, DEPTH.terrain);
     this.projectileGfx = this.add.graphics().setDepth(DEPTH.projectiles);
@@ -84,8 +91,9 @@ export class GameScene extends Phaser.Scene {
     this.powerMeter = new PowerMeter(this);
     this.fuelBar = new FuelBar(this);
     this.weaponPicker = new WeaponPicker(this, (id) => this.selectWeapon(id));
+    this.actionBar = new ActionBar(this, { repair: () => void this.repair(), shield: (id) => void this.activateShield(id) });
     this.add
-      .text(WORLD_WIDTH - 12, WORLD_HEIGHT - 60, '←/→ drive   ↑/↓ aim (Shift = fine)   W/S power   1–9 weapon   SPACE fire', textStyle(13, '#e8eef5'))
+      .text(WORLD_WIDTH - 12, WORLD_HEIGHT - 74, '←/→ drive   ↑/↓ aim (Shift = fine)   W/S power   1–9 weapon   R repair   E shield   SPACE fire', textStyle(13, '#e8eef5'))
       .setOrigin(1, 1)
       .setDepth(HUD_DEPTH)
       .setAlpha(0.85);
@@ -98,6 +106,8 @@ export class GameScene extends Phaser.Scene {
       down: 'DOWN',
       w: 'W',
       s: 'S',
+      r: 'R',
+      e: 'E',
       space: 'SPACE',
       enter: 'ENTER',
       shift: 'SHIFT',
@@ -137,7 +147,10 @@ export class GameScene extends Phaser.Scene {
     if (newRound) this.effects.clear();
     this.state = structuredClone(gs);
     this.terrain = [...gs.terrain];
-    this.terrainRenderer.draw(this.terrain);
+    this.map = getMap(gs.mapId) ?? getMap(DEFAULT_MAP_ID)!;
+    this.decorations = [...gs.decorations];
+    this.sky.draw(this.map);
+    this.terrainRenderer.draw(this.terrain, this.map, this.decorations);
 
     for (const [id, sprite] of this.tanks) {
       if (!gs.tanks.some((t) => t.playerId === id)) {
@@ -155,6 +168,7 @@ export class GameScene extends Phaser.Scene {
       sprite.setPosition(t.x, t.y, newRound);
       sprite.setAngle(t.angle);
       sprite.setHealth(t.health, t.alive);
+      sprite.setShield(t.shield);
       sprite.setCurrent(t.playerId === gs.currentPlayerId);
     }
 
@@ -167,7 +181,7 @@ export class GameScene extends Phaser.Scene {
     if (gs.currentPlayerId && gs.currentPlayerId === store.myId && !gs.shotInProgress) {
       const mine = gs.tanks.find((t) => t.playerId === store.myId)!;
       this.local.angle = mine.angle;
-      this.local.power = mine.power;
+      this.local.power = clampPower(mine.power, mine.maxPower);
       this.ensureWeaponOwned();
       this.aimDirty = true; // tell everyone which weapon I have selected
       sounds.play('turn');
@@ -179,10 +193,30 @@ export class GameScene extends Phaser.Scene {
   private applyTankUpdate(u: TankUpdate): void {
     const tank = this.state?.tanks.find((t) => t.playerId === u.playerId);
     if (!tank) return;
+    const before: Pick<TankState, 'maxPower' | 'health' | 'shield'> = { maxPower: tank.maxPower, health: tank.health, shield: tank.shield };
     Object.assign(tank, u);
     const sprite = this.tanks.get(u.playerId);
     sprite?.setPosition(u.x, u.y);
     if (!this.isMyTurn() || u.playerId !== store.myId) sprite?.setAngle(u.angle);
+    if (!sprite) return;
+
+    // Repairs and shields arrive as tank updates: show what changed.
+    const repaired = u.maxPower > before.maxPower + 0.05 || u.health > before.health;
+    if (repaired) {
+      const parts = [u.maxPower > before.maxPower + 0.05 ? `+${Math.round(u.maxPower - before.maxPower)} POWER` : '', u.health > before.health ? `+${u.health - before.health} HP` : ''];
+      this.effects.repair(sprite.x, sprite.y, parts.filter(Boolean).join('  '));
+      sounds.play('repair');
+    }
+    if (u.shield && !before.shield) {
+      this.effects.shieldUp(sprite.x, sprite.bubbleY, SHIELD_BUBBLE_RADIUS, getShield(u.shield.shieldId)?.color ?? 0xffffff);
+      sounds.play('shield');
+    }
+    if (repaired || u.shield?.hp !== before.shield?.hp) {
+      sprite.setHealth(u.health, u.alive);
+      sprite.setShield(u.shield);
+      if (u.playerId === store.myId) this.local.power = clampPower(this.local.power, u.maxPower);
+      this.refreshHud();
+    }
   }
 
   private startShot(shot: ShotResult): void {
@@ -202,22 +236,35 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onExplosion(ev: ExplosionEvent): void {
+    // Same order as the server: decorations are checked against the ground before the crater.
+    this.decorations = survivingDecorations(this.decorations, this.terrain, ev.x, ev.y, ev.craterRadius);
     carveCrater(this.terrain, ev.x, ev.y, ev.craterRadius);
-    this.terrainRenderer.draw(this.terrain);
+    this.terrainRenderer.draw(this.terrain, this.map, this.decorations);
     this.effects.explosion(ev.x, ev.y, ev.explosionRadius, ev.color);
     sounds.play('explosion', ev.explosionRadius / 100);
 
     for (const d of ev.damage) {
       const s = this.tanks.get(d.playerId);
-      if (s) this.effects.floatingText(s.x, s.y - 60, `-${d.amount}`);
+      if (!s) continue;
+      if (d.absorbed > 0) {
+        s.flashShield();
+        this.effects.floatingText(s.x + 34, s.y - 34, `🛡 ${d.absorbed}`, '#9fd8ff', 16);
+        sounds.play('shield');
+      }
+      if (d.shieldBroken) {
+        this.effects.shieldBreak(s.x, s.bubbleY, SHIELD_BUBBLE_RADIUS, getShield(s.shield?.shieldId ?? '')?.color ?? 0x9fd8ff);
+        sounds.play('shieldBreak');
+      }
+      if (d.amount > 0) this.effects.damageNumber(s.x, s.y - 60, d.amount, d.direct);
     }
-    if (ev.damage.length) sounds.play('hit');
+    if (ev.damage.some((d) => d.amount > 0)) sounds.play('hit');
     for (const t of ev.tanks) {
       const st = this.state?.tanks.find((x) => x.playerId === t.playerId);
       if (st) Object.assign(st, t);
       const s = this.tanks.get(t.playerId);
       s?.setPosition(t.x, t.y);
       s?.setHealth(t.health, t.alive);
+      s?.setShield(t.shield);
     }
     for (const id of ev.killed) {
       const s = this.tanks.get(id);
@@ -262,10 +309,11 @@ export class GameScene extends Phaser.Scene {
 
     const fine = k.shift.isDown ? 0.25 : 1;
     const before = { ...this.local };
+    const maxPower = this.myTank()?.maxPower ?? MAX_POWER;
     if (k.up.isDown) this.local.angle = clampAngle(this.local.angle + AIM_SPEED * fine * dt);
     if (k.down.isDown) this.local.angle = clampAngle(this.local.angle - AIM_SPEED * fine * dt);
-    if (k.w.isDown) this.local.power = clampPower(this.local.power + POWER_CHANGE_SPEED * fine * dt);
-    if (k.s.isDown) this.local.power = clampPower(this.local.power - POWER_CHANGE_SPEED * fine * dt);
+    if (k.w.isDown) this.local.power = clampPower(this.local.power + POWER_CHANGE_SPEED * fine * dt, maxPower);
+    if (k.s.isDown) this.local.power = clampPower(this.local.power - POWER_CHANGE_SPEED * fine * dt, maxPower);
     if (before.angle !== this.local.angle || before.power !== this.local.power) this.aimDirty = true;
 
     this.tanks.get(store.myId!)?.setAngle(this.local.angle);
@@ -277,7 +325,35 @@ export class GameScene extends Phaser.Scene {
       this.lastAimSent = now;
     }
 
+    if (Phaser.Input.Keyboard.JustDown(k.r)) void this.repair();
+    if (Phaser.Input.Keyboard.JustDown(k.e)) {
+      const best = store.me && ownedShields(store.me.shields)[0];
+      if (best) void this.activateShield(best.id);
+      else toast("You don't own a shield — buy one in the shop", 'error');
+    }
     if (Phaser.Input.Keyboard.JustDown(k.space) || Phaser.Input.Keyboard.JustDown(k.enter)) void this.fire();
+  }
+
+  private myTank(): TankState | undefined {
+    return this.state?.tanks.find((t) => t.playerId === store.myId);
+  }
+
+  /** Use a repair kit charge. Doesn't end the turn. */
+  private async repair(): Promise<void> {
+    if (!this.canControl()) return;
+    const res = await api.repair();
+    if (!res.ok) toast(res.error, 'error');
+  }
+
+  /** Switch on a shield. Doesn't end the turn. */
+  private async activateShield(shieldId: string): Promise<void> {
+    if (!this.canControl()) return;
+    if (this.myTank()?.shield) {
+      toast('You already have a shield up', 'error');
+      return;
+    }
+    const res = await api.activateShield(shieldId);
+    if (!res.ok) toast(res.error, 'error');
   }
 
   private async fire(): Promise<void> {
@@ -331,7 +407,7 @@ export class GameScene extends Phaser.Scene {
     const mine = this.isMyTurn();
     const angle = mine ? this.local.angle : (current?.angle ?? 0);
     const power = mine ? this.local.power : (current?.power ?? 0);
-    this.powerMeter.update(power, angle);
+    this.powerMeter.update(power, angle, current?.maxPower ?? MAX_POWER);
     this.fuelBar.update(current?.fuel ?? 0);
 
     const secondsLeft = this.turnEndsAt && !gs.shotInProgress ? Math.ceil(Math.max(0, this.turnEndsAt - performance.now()) / 1000) : null;
@@ -359,7 +435,10 @@ export class GameScene extends Phaser.Scene {
     this.ensureWeaponOwned();
     this.healthBars.update(room.players, gs.tanks, gs.currentPlayerId);
     const me = store.me;
-    if (me) this.weaponPicker.update(me.inventory, this.local.weaponId, this.isMyTurn());
+    if (me) {
+      this.weaponPicker.update(me.inventory, this.local.weaponId, this.isMyTurn());
+      this.actionBar.update(me, this.myTank(), this.isMyTurn() && !gs.shotInProgress);
+    }
     for (const p of room.players) this.tanks.get(p.id)?.setName(p.name, colorOf(p.color).hex);
   }
 }

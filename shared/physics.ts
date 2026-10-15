@@ -91,6 +91,7 @@ export function simulateShot(input: ShotInput): ShotResult {
   const ctx: SimContext = {
     terrain,
     wind,
+    dt: PHYSICS_DT,
     get time() {
       return now();
     },
@@ -101,6 +102,7 @@ export function simulateShot(input: ShotInput): ShotResult {
         id: nextId++,
         params: o.params ?? parent.params,
         state: {},
+        hitTankId: undefined,
         age: 0,
         alive: true,
       });
@@ -120,6 +122,7 @@ export function simulateShot(input: ShotInput): ShotResult {
           explosionRadius: p.explosionRadius,
           craterRadius: p.craterRadius,
           sourceId: p.ownerId,
+          hitTankId: p.hitTankId,
         }),
       );
     },
@@ -162,13 +165,17 @@ export function simulateShot(input: ShotInput): ShotResult {
       if (!p.alive) continue;
       const behavior = BEHAVIORS[p.behavior];
 
-      p.vx += wind * PHYSICS_DT;
-      p.vy += GRAVITY * PHYSICS_DT;
-      p.x += p.vx * PHYSICS_DT;
-      p.y += p.vy * PHYSICS_DT;
+      // A behavior may move the projectile itself (e.g. rolling along the ground).
+      if (!behavior.integrate?.(p, ctx)) {
+        p.vx += wind * PHYSICS_DT;
+        p.vy += GRAVITY * PHYSICS_DT;
+        p.x += p.vx * PHYSICS_DT;
+        p.y += p.vy * PHYSICS_DT;
+      }
       p.age += PHYSICS_DT;
 
       const b = tracks.get(p.id)!;
+      if (!p.alive) continue; // exploded inside integrate(): finishTrack already recorded its end
       b.steps++;
       if (b.steps % TRACK_SAMPLE_EVERY === 0) b.track.points.push(r1(p.x), r1(p.y));
 
@@ -191,6 +198,7 @@ export function simulateShot(input: ShotInput): ShotResult {
       if (!impact && isSolid(terrain, p.x, p.y)) impact = { kind: 'terrain' };
 
       if (impact) {
+        if (impact.kind === 'tank') p.hitTankId = impact.playerId;
         if (behavior.onImpact) behavior.onImpact(p, ctx, impact);
         else ctx.explode(p);
         if (!p.alive) continue;

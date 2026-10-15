@@ -64,6 +64,13 @@ export function registerSocketHandlers(io: IO, rooms: RoomManager): void {
       reply(cur.room.start(cur.playerId));
     });
 
+    socket.on('room:map', (payload, ack) => {
+      const reply = safeAck<Ack<null>>(ack);
+      const cur = currentRoom();
+      if (!cur) return reply({ ok: false, error: 'You are not in a room' });
+      reply(cur.room.setMap(cur.playerId, isObject(payload) ? payload.mapId : undefined));
+    });
+
     socket.on('room:backToLobby', () => {
       const cur = currentRoom();
       if (cur) cur.room.backToLobby(cur.playerId);
@@ -88,12 +95,27 @@ export function registerSocketHandlers(io: IO, rooms: RoomManager): void {
       reply(cur.room.fire(cur.playerId, payload));
     });
 
+    socket.on('game:repair', (ack) => {
+      const reply = safeAck<Ack<null>>(ack);
+      const cur = currentRoom();
+      if (!cur) return reply({ ok: false, error: 'You are not in a room' });
+      reply(cur.room.repair(cur.playerId));
+    });
+
+    socket.on('game:shield', (payload, ack) => {
+      const reply = safeAck<Ack<null>>(ack);
+      const cur = currentRoom();
+      if (!cur) return reply({ ok: false, error: 'You are not in a room' });
+      reply(cur.room.activateShield(cur.playerId, isObject(payload) ? payload.shieldId : undefined));
+    });
+
     // ------------------------------------------------------------ shop
     socket.on('shop:buy', (payload, ack) => {
       const reply = safeAck<Ack<null>>(ack);
       const cur = currentRoom();
       if (!cur) return reply({ ok: false, error: 'You are not in a room' });
-      reply(cur.room.buy(cur.playerId, isObject(payload) ? payload.weaponId : undefined));
+      if (!isObject(payload)) return reply({ ok: false, error: 'Unknown item' });
+      reply(cur.room.buy(cur.playerId, payload.category, payload.itemId));
     });
 
     socket.on('shop:ready', (payload) => {

@@ -1,12 +1,30 @@
-import { MAX_NAME_LENGTH, MAX_PLAYERS, MIN_PLAYERS_TO_START, PLAYER_COLORS } from '@shared/constants';
+import { MAX_NAME_LENGTH, MAX_PLAYERS, MIN_PLAYERS_TO_START, PLAYER_COLORS, RANDOM_MAP_ID } from '@shared/constants';
+import { MAPS } from '@shared/maps';
 import type { ColorId } from '@shared/types';
 import { sounds } from '../audio/sounds';
 import { copyText, h, replaceChildren, toast, type Page } from '../dom';
 import { leaveRoom } from '../actions';
+import { renderMapPreview } from '../game/mapArt';
 import { api } from '../net';
 import { colorOf, store } from '../store';
 
-/** Page 2: waiting room — pick a name and a color, host starts the game. */
+const THUMB_W = 160;
+const THUMB_H = 90;
+
+/** Map choices for the picker: every registered map, then Random. */
+function mapChoices(): { id: string; name: string; description: string; thumb: () => HTMLElement }[] {
+  return [
+    ...MAPS.map((m) => ({ id: m.id, name: m.name, description: m.description, thumb: () => renderMapPreview(m, THUMB_W, THUMB_H) })),
+    {
+      id: RANDOM_MAP_ID,
+      name: 'Random',
+      description: 'A different map every round.',
+      thumb: () => h('div', { class: 'map-thumb-random' }, '?'),
+    },
+  ];
+}
+
+/** Page 2: waiting room — pick a name and a color, host picks the map and starts the game. */
 export class RoomPage implements Page {
   readonly el: HTMLElement;
   private nameInput = h('input', { class: 'name-input', maxLength: MAX_NAME_LENGTH, placeholder: 'Your name', autocomplete: 'off' });
@@ -18,6 +36,19 @@ export class RoomPage implements Page {
     ]),
   );
   private swatches = h('div', { class: 'swatches' }, ...this.swatchButtons.values());
+  // Map buttons: built once (previews are drawn once), selection updated in place.
+  private mapButtons = new Map(
+    mapChoices().map((m) => [
+      m.id,
+      h(
+        'button',
+        { class: 'map-choice', title: m.description, on: { click: () => void this.pickMap(m.id) } },
+        m.thumb(),
+        h('span', { class: 'map-name' }, m.name),
+      ),
+    ]),
+  );
+  private mapHint = h('p', { class: 'hint map-hint' });
   private playerList = h('ul', { class: 'player-list' });
   private countLabel = h('h3', {});
   private startBtn = h('button', { class: 'btn btn-primary btn-big' }, 'Start Game');
@@ -57,6 +88,7 @@ export class RoomPage implements Page {
         ),
         h('div', { class: 'card' }, this.countLabel, this.playerList),
       ),
+      h('div', { class: 'card' }, h('h3', {}, 'Map'), h('div', { class: 'map-grid' }, ...this.mapButtons.values()), this.mapHint),
       h(
         'div',
         { class: 'room-actions' },
@@ -85,6 +117,14 @@ export class RoomPage implements Page {
       btn.disabled = taken;
       btn.title = taken ? `${c.label} (taken by ${owner!.name || 'someone'})` : c.label;
     }
+
+    const isHostNow = room.hostId === me.id;
+    for (const [id, btn] of this.mapButtons) {
+      btn.classList.toggle('selected', room.mapId === id);
+      btn.disabled = !isHostNow;
+    }
+    const chosen = mapChoices().find((m) => m.id === room.mapId);
+    this.mapHint.textContent = `${chosen ? `${chosen.name}: ${chosen.description}` : ''}${isHostNow ? '' : ' (the host picks the map)'}`;
 
     this.countLabel.textContent = `Players (${room.players.length}/${MAX_PLAYERS})`;
     replaceChildren(
@@ -128,6 +168,13 @@ export class RoomPage implements Page {
   private async pickColor(color: ColorId): Promise<void> {
     sounds.play('click');
     const res = await api.setProfile({ color });
+    if (!res.ok) toast(res.error, 'error');
+  }
+
+  private async pickMap(mapId: string): Promise<void> {
+    if (store.room?.mapId === mapId) return;
+    sounds.play('click');
+    const res = await api.setMap(mapId);
     if (!res.ok) toast(res.error, 'error');
   }
 

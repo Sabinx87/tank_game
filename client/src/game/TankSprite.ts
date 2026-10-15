@@ -1,10 +1,15 @@
 import Phaser from 'phaser';
-import { BARREL_LENGTH, MAX_HEALTH, TANK_HEIGHT, TANK_WIDTH, TURRET_PIVOT_HEIGHT } from '@shared/constants';
+import { BARREL_LENGTH, MAX_HEALTH, SHIELD_BUBBLE_RADIUS, TANK_HEIGHT, TANK_WIDTH, TURRET_PIVOT_HEIGHT } from '@shared/constants';
+import { getShield } from '@shared/shields';
 import { heightAt } from '@shared/terrain';
+import type { ActiveShield } from '@shared/types';
 
 const DEAD_COLOR = 0x4a4a4a;
 
-/** One tank: hull, turret, barrel, name label and a mini health bar. */
+/** Centre of the shield bubble relative to the tank's ground point. */
+const BUBBLE_Y = -TANK_HEIGHT / 2 - 4;
+
+/** One tank: hull, turret, barrel, shield bubble, name label and a mini health bar. */
 export class TankSprite {
   readonly container: Phaser.GameObjects.Container;
   private readonly hull: Phaser.GameObjects.Graphics;
@@ -12,6 +17,10 @@ export class TankSprite {
   private readonly label: Phaser.GameObjects.Text;
   private readonly hpBar: Phaser.GameObjects.Graphics;
   private readonly marker: Phaser.GameObjects.Triangle;
+  private readonly bubble: Phaser.GameObjects.Graphics;
+  private shieldKey = '';
+  /** Currently active shield (for effects), or null. */
+  shield: ActiveShield | null = null;
   private targetX = 0;
   private targetY = 0;
   private alive = true;
@@ -32,9 +41,11 @@ export class TankSprite {
       .text(0, -52, name, { fontFamily: 'Trebuchet MS, sans-serif', fontSize: '14px', color: '#ffffff', stroke: '#000', strokeThickness: 3 })
       .setOrigin(0.5);
     this.hpBar = scene.add.graphics();
+    this.bubble = scene.add.graphics().setPosition(0, BUBBLE_Y);
+    scene.tweens.add({ targets: this.bubble, scale: 1.04, duration: 900, yoyo: true, repeat: -1, ease: 'Sine.inOut' });
     this.marker = scene.add.triangle(0, -72, 0, 0, 16, 0, 8, 12, 0xffffff).setVisible(false);
     scene.tweens.add({ targets: this.marker, y: -64, duration: 450, yoyo: true, repeat: -1, ease: 'Sine.inOut' });
-    this.container = scene.add.container(0, 0, [this.barrel, this.hull, this.label, this.hpBar, this.marker]).setDepth(depth);
+    this.container = scene.add.container(0, 0, [this.barrel, this.hull, this.bubble, this.label, this.hpBar, this.marker]).setDepth(depth);
     this.drawHull();
     this.drawBarrel();
     this.drawHp();
@@ -77,8 +88,39 @@ export class TankSprite {
       this.alive = alive;
       this.drawHull();
       this.drawBarrel();
+      if (!alive) this.setShield(null);
     }
     if (changed) this.drawHp();
+  }
+
+  /** Show / resize the shield bubble: it shrinks and fades as shield HP drops. */
+  setShield(shield: ActiveShield | null): void {
+    const key = shield ? `${shield.shieldId}:${shield.hp}` : '';
+    if (key === this.shieldKey) return;
+    this.shieldKey = key;
+    this.shield = shield ? { ...shield } : null;
+    const g = this.bubble.clear();
+    const def = shield && getShield(shield.shieldId);
+    if (!shield || !def || !this.alive) return;
+    const frac = Phaser.Math.Clamp(shield.hp / def.hp, 0, 1);
+    const r = SHIELD_BUBBLE_RADIUS * (0.72 + 0.28 * frac);
+    g.fillStyle(def.color, 0.08 + 0.17 * frac).fillCircle(0, 0, r);
+    g.lineStyle(2 + frac, def.color, 0.35 + 0.5 * frac).strokeCircle(0, 0, r);
+    g.fillStyle(0xffffff, 0.12 + 0.2 * frac).fillEllipse(-r * 0.35, -r * 0.45, r * 0.6, r * 0.3);
+  }
+
+  /** Brief bright pulse when the shield soaks up a hit. */
+  flashShield(): void {
+    if (!this.shield) return;
+    const def = getShield(this.shield.shieldId);
+    const flash = this.scene.add.circle(0, BUBBLE_Y, SHIELD_BUBBLE_RADIUS, def?.color ?? 0xffffff, 0.55);
+    this.container.add(flash);
+    this.scene.tweens.add({ targets: flash, alpha: 0, scale: 1.25, duration: 320, ease: 'Cubic.out', onComplete: () => flash.destroy() });
+  }
+
+  /** World position of the bubble centre (for the "pop" effect). */
+  get bubbleY(): number {
+    return this.y + BUBBLE_Y;
   }
 
   setCurrent(current: boolean): void {

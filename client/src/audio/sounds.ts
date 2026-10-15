@@ -3,7 +3,20 @@
  * how it's produced. Right now every sound is synthesised with WebAudio (no
  * asset files needed); swap any entry for a real audio file later.
  */
-export type SoundName = 'click' | 'fire' | 'explosion' | 'hit' | 'death' | 'turn' | 'buy' | 'error' | 'win' | 'tick';
+export type SoundName =
+  | 'click'
+  | 'fire'
+  | 'explosion'
+  | 'hit'
+  | 'death'
+  | 'turn'
+  | 'buy'
+  | 'error'
+  | 'win'
+  | 'tick'
+  | 'shield'
+  | 'shieldBreak'
+  | 'repair';
 
 const MUTE_KEY = 'tanks.muted';
 
@@ -94,6 +107,12 @@ const HOOKS: Record<SoundName, (ctx: AudioContext, size: number) => void> = {
     setTimeout(() => tone(c, 1320, 0.12, 'square', 0.05), 70);
   },
   error: (c) => tone(c, 160, 0.2, 'square', 0.07),
+  shield: (c) => tone(c, 520, 0.3, 'sine', 0.08, 1040),
+  shieldBreak: (c) => {
+    tone(c, 1200, 0.35, 'triangle', 0.08, 200);
+    noise(c, 0.3, 0.2, 4000);
+  },
+  repair: (c) => [440, 554, 659].forEach((f, i) => setTimeout(() => tone(c, f, 0.12, 'triangle', 0.08), i * 80)),
   win: (c) => [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => tone(c, f, 0.25, 'triangle', 0.1), i * 140)),
 };
 

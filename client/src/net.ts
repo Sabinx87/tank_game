@@ -1,5 +1,6 @@
 /** Typed Socket.IO connection + promise wrappers for request/response events. */
 import { io, type Socket } from 'socket.io-client';
+import type { ShopCategory } from '@shared/shop';
 import type { AckResult, ClientToServerEvents, ColorId, JoinedRoom, ServerToClientEvents } from '@shared/types';
 
 export type ClientSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
@@ -22,6 +23,7 @@ export const api = {
   rejoinRoom: (code: string, token: string) => call<JoinedRoom>((ack) => socket.emit('room:rejoin', { code, token }, ack)),
   leaveRoom: () => socket.emit('room:leave'),
   setProfile: (profile: { name?: string; color?: ColorId }) => call<null>((ack) => socket.emit('room:profile', profile, ack)),
+  setMap: (mapId: string) => call<null>((ack) => socket.emit('room:map', { mapId }, ack)),
   startGame: () => call<null>((ack) => socket.emit('room:start', ack)),
   backToLobby: () => socket.emit('room:backToLobby'),
 
@@ -29,7 +31,9 @@ export const api = {
   aim: (angle: number, power: number, weaponId: string) => socket.emit('game:aim', { angle, power, weaponId }),
   fire: (angle: number, power: number, weaponId: string) =>
     call<null>((ack) => socket.emit('game:fire', { angle, power, weaponId }, ack)),
+  repair: () => call<null>((ack) => socket.emit('game:repair', ack)),
+  activateShield: (shieldId: string) => call<null>((ack) => socket.emit('game:shield', { shieldId }, ack)),
 
-  buy: (weaponId: string) => call<null>((ack) => socket.emit('shop:buy', { weaponId }, ack)),
+  buy: (category: ShopCategory, itemId: string) => call<null>((ack) => socket.emit('shop:buy', { category, itemId }, ack)),
   setReady: (ready: boolean) => socket.emit('shop:ready', { ready }),
 };

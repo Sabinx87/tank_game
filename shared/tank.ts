@@ -1,11 +1,14 @@
 /** Tank geometry and movement rules (shared so client previews match the server). */
 import {
   BARREL_LENGTH,
+  BASE_MAX_POWER,
   MAX_ANGLE,
   MAX_CLIMB_SLOPE,
+  MAX_HEALTH,
   MAX_POWER,
   MIN_ANGLE,
   MIN_POWER,
+  MIN_POWER_FACTOR,
   POWER_TO_SPEED,
   TANK_SPEED,
   TANK_WIDTH,
@@ -16,7 +19,18 @@ import { heightAt, type Rng } from './terrain';
 
 export const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 export const clampAngle = (a: number) => clamp(a, MIN_ANGLE, MAX_ANGLE);
-export const clampPower = (p: number) => clamp(p, MIN_POWER, MAX_POWER);
+export const clampPower = (p: number, maxPower = MAX_POWER) => clamp(p, MIN_POWER, Math.max(MIN_POWER, maxPower));
+
+/** Power cap from health alone: full at full health, MIN_POWER_FACTOR of it when nearly dead. */
+export function healthPowerCap(health: number): number {
+  const frac = clamp(health / MAX_HEALTH, 0, 1);
+  return BASE_MAX_POWER * (MIN_POWER_FACTOR + (1 - MIN_POWER_FACTOR) * frac);
+}
+
+/** Usable maximum power: health-based cap plus any repair-kit boost, never above BASE_MAX_POWER. */
+export function maxPowerFor(health: number, powerBoost: number): number {
+  return Math.round(Math.min(BASE_MAX_POWER, healthPowerCap(health) + powerBoost) * 10) / 10;
+}
 
 const DEG = Math.PI / 180;
 

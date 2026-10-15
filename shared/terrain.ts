@@ -14,25 +14,81 @@ export type Rng = () => number;
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
 
-/** Random rolling hills built from a few layered sine waves. */
-export function generateTerrain(rng: Rng = Math.random, width = WORLD_WIDTH): number[] {
-  const minY = WORLD_HEIGHT * TERRAIN_MIN_HEIGHT_RATIO;
-  const maxY = WORLD_HEIGHT * TERRAIN_MAX_HEIGHT_RATIO;
-  const base = minY + (maxY - minY) * (0.45 + rng() * 0.2);
+/** Shape of a map's ground. Every map in maps.ts has one of these. */
+export interface TerrainSettings {
+  /** Highest / lowest ground allowed, as fractions of the world height from the top. */
+  minHeightRatio: number;
+  maxHeightRatio: number;
+  /** Average ground level: random in [min, max], as a fraction from highest (0) to lowest (1) ground. */
+  baseHeight: [number, number];
+  /** Number of sine layers stacked to build the hills. */
+  layers: number;
+  /** How many big hills fit across the map (frequency multiplier, 1 = classic). */
+  hills: number;
+  /** Height of the biggest hills, as a fraction of the allowed range. */
+  hillHeight: number;
+  /** How much the smaller layers add detail (1 = classic, <1 smoother, >1 more jagged). */
+  roughness: number;
+  /** 1 = smooth sine hills; >1 = narrow sharp peaks with wide deep valleys; <1 = flat-topped. */
+  peakSharpness: number;
+}
 
-  const waves = Array.from({ length: 5 }, (_, i) => ({
-    amp: ((maxY - minY) * 0.32 * (0.4 + rng() * 0.8)) / (i + 1),
-    freq: ((2 * Math.PI) / width) * (i + 1) * (0.6 + rng() * 0.9),
+/** The original "Classic" terrain. */
+export const DEFAULT_TERRAIN_SETTINGS: TerrainSettings = {
+  minHeightRatio: TERRAIN_MIN_HEIGHT_RATIO,
+  maxHeightRatio: TERRAIN_MAX_HEIGHT_RATIO,
+  baseHeight: [0.45, 0.65],
+  layers: 5,
+  hills: 1,
+  hillHeight: 0.32,
+  roughness: 1,
+  peakSharpness: 1,
+};
+
+/** Random hills built from a few layered sine waves, shaped by `settings`. */
+export function generateTerrain(rng: Rng = Math.random, settings: TerrainSettings = DEFAULT_TERRAIN_SETTINGS, width = WORLD_WIDTH): number[] {
+  const minY = WORLD_HEIGHT * settings.minHeightRatio;
+  const maxY = WORLD_HEIGHT * settings.maxHeightRatio;
+  const [b0, b1] = settings.baseHeight;
+  const base = minY + (maxY - minY) * (b0 + rng() * (b1 - b0));
+
+  const waves = Array.from({ length: settings.layers }, (_, i) => ({
+    amp: ((maxY - minY) * settings.hillHeight * (0.4 + rng() * 0.8)) / (i + 1) ** (1 / settings.roughness),
+    freq: ((2 * Math.PI) / width) * (i + 1) * (0.6 + rng() * 0.9) * settings.hills,
     phase: rng() * Math.PI * 2,
   }));
+  const totalAmp = waves.reduce((sum, w) => sum + w.amp, 0) || 1;
+  const p = settings.peakSharpness;
 
   const heights = new Array<number>(width);
   for (let x = 0; x < width; x++) {
-    let y = base;
-    for (const w of waves) y += w.amp * Math.sin(w.freq * x + w.phase);
-    heights[x] = round2(Math.min(maxY, Math.max(minY, y)));
+    let offset = 0;
+    for (const w of waves) offset += w.amp * Math.sin(w.freq * x + w.phase);
+    if (p !== 1) {
+      // Normalised height in [0, 1] (1 = highest), curved, then mapped back.
+      const up = Math.min(1, Math.max(0, (1 - offset / totalAmp) / 2));
+      offset = (1 - 2 * up ** p) * totalAmp;
+    }
+    heights[x] = round2(Math.min(maxY, Math.max(minY, base + offset)));
   }
   return heights;
+}
+
+/**
+ * Walk from x in direction `dir` while the ground keeps rising (small dips up to
+ * `tolerance` px are crossed). Returns the column of the highest point reached
+ * within `maxDistance` px — x itself if the ground doesn't rise that way.
+ */
+export function findPeak(terrain: number[], x: number, dir: -1 | 1, maxDistance: number, tolerance = 2): number {
+  const start = Math.max(0, Math.min(terrain.length - 1, Math.round(x)));
+  let best = start;
+  for (let d = 1; d <= maxDistance; d++) {
+    const cx = start + dir * d;
+    if (cx < 0 || cx >= terrain.length) break;
+    if (terrain[cx] < terrain[best]) best = cx;
+    else if (terrain[cx] > terrain[best] + tolerance) break; // over the top, going downhill
+  }
+  return best;
 }
 
 /** Ground surface y at any (possibly fractional / out-of-range) x. */

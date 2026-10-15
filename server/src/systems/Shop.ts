@@ -1,16 +1,7 @@
 import { getWeapon } from '@shared/weapons';
 import type { Player } from '../Player';
 
-/** Buying weapons between rounds. Returns an error message, or null on success. */
-export function buyWeapon(player: Player, weaponId: string): string | null {
-  const weapon = getWeapon(weaponId);
-  if (!weapon) return 'Unknown weapon';
-  if (weapon.unlimited) return `${weapon.name} is free and unlimited`;
-  if (player.points < weapon.cost) return 'Not enough points';
-  player.points -= weapon.cost;
-  player.inventory[weapon.id] = (player.inventory[weapon.id] ?? 0) + 1;
-  return null;
-}
+// Buying is shared with the shop page: see buyItem() in shared/shop.ts.
 
 /** True if the player may fire this weapon right now. */
 export function canUseWeapon(player: Player, weaponId: string): boolean {
@@ -26,4 +17,11 @@ export function consumeWeapon(player: Player, weaponId: string): void {
   const left = (player.inventory[weaponId] ?? 0) - 1;
   if (left > 0) player.inventory[weaponId] = left;
   else delete player.inventory[weaponId];
+}
+
+/** Take one shield out of the player's stock. */
+export function consumeShield(player: Player, shieldId: string): void {
+  const left = (player.shields[shieldId] ?? 0) - 1;
+  if (left > 0) player.shields[shieldId] = left;
+  else delete player.shields[shieldId];
 }
